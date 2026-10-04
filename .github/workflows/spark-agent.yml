@@ -31,6 +31,9 @@ jobs:
         with:
           gradle-version: '8.7'
 
+      - name: Install Python Dependencies
+        run: pip install requests
+
       # Step 1: If triggered by a phone issue, Spark architects the code
       - name: Generate Code from Issue
         if: github.event_name == 'issues' && startsWith(github.event.issue.title, 'build:')
@@ -42,9 +45,13 @@ jobs:
           python3 - << 'EOF'
           import os, json, requests
 
-          api_key = os.environ["GEMINI_API_KEY"]
-          prompt = os.environ["PROMPT_TEXT"]
+          api_key = os.environ.get("GEMINI_API_KEY", "")
+          prompt = os.environ.get("PROMPT_TEXT", "")
           
+          if not api_key:
+              print("[-] Error: GEMINI_API_KEY secret is missing or empty!")
+              exit(1)
+
           url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
           sys_instruct = (
               "You are Spark, an autonomous Android engineer. "
@@ -60,6 +67,10 @@ jobs:
           }
           
           res = requests.post(url, json=payload).json()
+          if "candidates" not in res:
+              print(f"[-] API Error: {res}")
+              exit(1)
+
           files = json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
           
           for f in files:
@@ -73,6 +84,7 @@ jobs:
       - name: Run Build and Self-Heal
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANDROID_HOME: /usr/local/lib/android/sdk
         run: |
           MAX_ATTEMPTS=3
           ATTEMPT=1
@@ -91,7 +103,7 @@ jobs:
             python3 - << 'EOF'
             import os, json, requests
 
-            api_key = os.environ["GEMINI_API_KEY"]
+            api_key = os.environ.get("GEMINI_API_KEY", "")
             with open("build_log.txt") as f:
                 log = f.read()[-3000:]
 
@@ -103,12 +115,12 @@ jobs:
                 "generationConfig": {"responseMimeType": "application/json"}
             }
             res = requests.post(url, json=payload).json()
-            data = json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
-            
-            os.makedirs(os.path.dirname(data["target_file"]), exist_ok=True)
-            with open(data["target_file"], "w") as out:
-                out.write(data["fixed_content"])
-            print(f"[+] Self-healed {data['target_file']}")
+            if "candidates" in res:
+                data = json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
+                os.makedirs(os.path.dirname(data["target_file"]), exist_ok=True)
+                with open(data["target_file"], "w") as out:
+                    out.write(data["fixed_content"])
+                print(f"[+] Self-healed {data['target_file']}")
             EOF
             
             ATTEMPT=$((ATTEMPT + 1))
