@@ -1,0 +1,152 @@
+name: Spark Autonomous APK Forge
+
+on:
+  push:
+    branches: [ main ]
+  issues:
+    types: [ opened, edited ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  forge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: '8.7'
+
+      # Step 1: If triggered by a phone issue, Spark architects the code
+      - name: Generate Code from Issue
+        if: github.event_name == 'issues' && startsWith(github.event.issue.title, 'build:')
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          PROMPT_TEXT: ${{ github.event.issue.body }}
+        run: |
+          echo "[*] Asking Gemini to architect project from phone prompt..."
+          python3 - << 'EOF'
+          import os, json, requests
+
+          api_key = os.environ["GEMINI_API_KEY"]
+          prompt = os.environ["PROMPT_TEXT"]
+          
+          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+          sys_instruct = (
+              "You are Spark, an autonomous Android engineer. "
+              "Output ONLY a raw JSON array of objects with 'path' and 'content' for the entire Android project "
+              "(settings.gradle, build.gradle, app/build.gradle, AndroidManifest.xml, and all Kotlin/Java source files). "
+              "Use Gradle 8.7, AGP 8.4.2, JDK 17. No markdown fences around the JSON."
+          )
+          
+          payload = {
+              "systemInstruction": {"parts": [{"text": sys_instruct}]},
+              "contents": [{"parts": [{"text": f"Generate full project for: {prompt}"}]}],
+              "generationConfig": {"responseMimeType": "application/json"}
+          }
+          
+          res = requests.post(url, json=payload).json()
+          files = json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
+          
+          for f in files:
+              os.makedirs(os.path.dirname(f["path"]), exist_ok=True)
+              with open(f["path"], "w") as out:
+                  out.write(f["content"])
+          print(f"[+] Successfully wrote {len(files)} files.")
+          EOF
+
+      # Step 2: Build & Self-Heal loop
+      - name: Run Build and Self-Heal
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          MAX_ATTEMPTS=3
+          ATTEMPT=1
+          SUCCESS=false
+
+          while [ $ATTEMPT -le$MAX_ATTEMPTS ]; do
+            echo "[*] Compile Attempt $ATTEMPT of$MAX_ATTEMPTS..."
+            gradle assembleDebug --stacktrace 2>&1 | tee build_log.txt
+            
+            if [ ${PIPESTATUS[0]} -eq 0 ]; then
+              SUCCESS=true
+              break
+            fi
+            
+            echo "[!] Build failed. Requesting autonomous repair from Gemini..."
+            python3 - << 'EOF'
+            import os, json, requests
+
+            api_key = os.environ["GEMINI_API_KEY"]
+            with open("build_log.txt") as f:
+                log = f.read()[-3000:]
+
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            prompt = f"The Android Gradle build failed. Return a JSON object with 'target_file' and 'fixed_content' with no markdown fences.\nLog:\n{log}"
+            
+            payload = {
+                "contents": [{"parts": [{"text": prompt}]}],
+                "generationConfig": {"responseMimeType": "application/json"}
+            }
+            res = requests.post(url, json=payload).json()
+            data = json.loads(res["candidates"][0]["content"]["parts"][0]["text"])
+            
+            os.makedirs(os.path.dirname(data["target_file"]), exist_ok=True)
+            with open(data["target_file"], "w") as out:
+                out.write(data["fixed_content"])
+            print(f"[+] Self-healed {data['target_file']}")
+            EOF
+            
+            ATTEMPT=$((ATTEMPT + 1))
+          done
+
+          if [ "$SUCCESS" = false ]; then
+            echo "Failed to compile after $MAX_ATTEMPTS attempts."
+            exit 1
+          fi
+
+      # Step 3: Always upload the artifact to Actions
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          path: app/build/outputs/apk/debug/*.apk
+
+      # Step 4: If an issue triggered this, release and post link in comments
+      - name: Publish Release for Issue
+        if: github.event_name == 'issues' && startsWith(github.event.issue.title, 'build:')
+        uses: softprops/action-gh-release@v2
+        id: create_release
+        with:
+          tag_name: build-${{ github.event.issue.number }}-${{ github.run_id }}
+          name: "Spark Build: Issue #${{ github.event.issue.number }}"
+          files: app/build/outputs/apk/debug/*.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Comment Download Link on Issue
+        if: github.event_name == 'issues' && startsWith(github.event.issue.title, 'build:')
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const releaseUrl = "${{ steps.create_release.outputs.url }}";
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `### Spark Build Complete!\n\nYour APK compiled and verified cleanly.\n\n**[Download Your APK Here](${releaseUrl})**`
+            });
