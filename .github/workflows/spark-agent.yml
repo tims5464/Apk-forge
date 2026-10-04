@@ -41,7 +41,7 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PROMPT_TEXT: ${{ github.event.issue.body }}
         run: |
-          echo "[*] Asking Gemini to architect project from phone prompt..."
+          echo "[*] Asking Gemini 3.8 Flash to architect project from prompt..."
           python3 - << 'EOF'
           import os, json, requests
 
@@ -52,7 +52,7 @@ jobs:
               print("[-] Error: GEMINI_API_KEY secret is missing or empty!")
               exit(1)
 
-          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+          url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
           sys_instruct = (
               "You are Spark, an autonomous Android engineer. "
               "Output ONLY a raw JSON array of objects with 'path' and 'content' for the entire Android project "
@@ -99,7 +99,7 @@ jobs:
               break
             fi
             
-            echo "[!] Build failed. Requesting autonomous repair from Gemini..."
+            echo "[!] Build failed. Requesting autonomous repair from Gemini 3.8 Flash..."
             python3 - << 'EOF'
             import os, json, requests
 
@@ -107,7 +107,7 @@ jobs:
             with open("build_log.txt") as f:
                 log = f.read()[-3000:]
 
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key={api_key}"
             prompt = f"The Android Gradle build failed. Return a JSON object with 'target_file' and 'fixed_content' with no markdown fences.\nLog:\n{log}"
             
             payload = {
