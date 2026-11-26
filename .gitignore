@@ -1,0 +1,6 @@
+build_log.txt
+.gradle/
+build/
+app/build/
+local.properties
+spark_raw_response.txt
