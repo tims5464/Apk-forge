@@ -3,3 +3,4 @@ build_log.txt
 build/
 app/build/
 local.properties
+spark_raw_response.txt

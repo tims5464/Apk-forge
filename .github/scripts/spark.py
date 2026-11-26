@@ -64,7 +64,7 @@ def available_models():
     return names
 
 
-def call_gemini(system, user):
+def call_gemini(system, user, skip=()):
     if not API_KEY:
         log("[-] GEMINI_API_KEY secret is missing or empty.")
         sys.exit(1)
@@ -81,6 +81,7 @@ def call_gemini(system, user):
     avail = available_models()
     flash = [m for m in avail if "flash" in m]
     models += [m for m in flash + avail if m not in models][:8]
+    models = [m for m in models if m not in skip]
     for model in models:
         tries = 5 if model == models[0] else 3
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -94,9 +95,14 @@ def call_gemini(system, user):
             if r.status_code == 200:
                 try:
                     data = r.json()
-                    text = "".join(p.get("text", "") for p in data["candidates"][0]["content"]["parts"])
+                    parts = data["candidates"][0]["content"]["parts"]
+                    text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
+                    Path("spark_raw_response.txt").write_text(text)
+                    if not text.strip():
+                        log(f"[!] {model} returned empty text (finish: {data['candidates'][0].get('finishReason')})")
+                        break
                     log(f"[+] Response from {model} ({len(text)} chars)")
-                    return text
+                    return model, text
                 except (KeyError, IndexError, ValueError):
                     log(f"[!] {model} returned no usable candidate: {r.text[:500]}")
                     break
@@ -111,7 +117,7 @@ def call_gemini(system, user):
             log(f"[!] {model} HTTP {r.status_code}: {r.text[:300]} -> trying next model")
             break
     log("[-] All Gemini models failed.")
-    return None
+    return None, None
 
 
 def parse_files(text):
@@ -174,16 +180,17 @@ def generate():
         log("[-] PROMPT_TEXT is empty.")
         sys.exit(1)
     system = "You are Spark, an autonomous senior Android engineer.\n" + RULES
-    n = 0
+    n, bad = 0, []
     for attempt in range(1, 4):
-        text = call_gemini(system, f"Generate the complete, compilable Android project for this spec:\n\n{prompt}")
+        model, text = call_gemini(system, f"Generate the complete, compilable Android project for this spec:\n\n{prompt}", skip=bad)
         if not text:
             sys.exit(1)
         try:
             n = write_files(parse_files(text))
             break
         except Exception as e:
-            log(f"[!] Could not parse model output (attempt {attempt}/3): {e}")
+            log(f"[!] Could not parse {model} output (attempt {attempt}/3): {e}\n    starts with: {text[:300]!r}")
+            bad.append(model)
     else:
         log("[-] Model output unparseable after 3 attempts.")
         sys.exit(1)
@@ -202,7 +209,7 @@ def heal():
               "Return ONLY the files you change, each as a COMPLETE file.\n" + RULES)
     user = (f"Gradle build failed.\n\nKey error lines:\n{summary}\n\nLog tail:\n{tail}\n\n"
             f"Current project files:\n{project_sources()}")
-    text = call_gemini(system, user)
+    _, text = call_gemini(system, user)
     if not text:
         return
     try:

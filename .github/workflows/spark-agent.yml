@@ -151,6 +151,7 @@ jobs:
             !.git
             !**/build/**
             !.gradle
+            spark_raw_response.txt
           if-no-files-found: ignore
 
       # Step 4: If an issue triggered this, release and post link in comments
