@@ -10,8 +10,7 @@ from pathlib import Path
 import requests
 
 API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
-MODELS = [m.strip() for m in os.environ.get(
-    "GEMINI_MODELS", "gemini-3.8-flash,gemini-2.5-flash,gemini-2.5-pro").split(",") if m.strip()]
+PREFERRED = [m.strip() for m in os.environ.get("GEMINI_MODELS", "gemini-3.8-flash").split(",") if m.strip()]
 ROOT = Path.cwd().resolve()
 TEXT_EXT = {".gradle", ".kts", ".kt", ".java", ".xml", ".properties", ".pro", ".toml"}
 
@@ -38,6 +37,33 @@ def log(msg):
     print(msg, flush=True)
 
 
+def available_models():
+    """Ask the API which text models this key can use, best candidates first."""
+    names = []
+    try:
+        r = requests.get("https://generativelanguage.googleapis.com/v1beta/models",
+                         params={"key": API_KEY, "pageSize": 1000}, timeout=30)
+        for m in r.json().get("models", []):
+            if "generateContent" not in m.get("supportedGenerationMethods", []):
+                continue
+            n = m["name"].split("/", 1)[-1]
+            if not n.startswith("gemini") or re.search(r"image|tts|live|audio|embed|robotics|computer|nano|lite", n):
+                continue
+            names.append(n)
+    except Exception as e:
+        log(f"[!] Could not list models: {e}")
+
+    def score(n):
+        v = re.findall(r"gemini-(\d+(?:\.\d+)?)", n)
+        ver = float(v[0]) if v else 0
+        stable = 0 if re.search(r"preview|exp|latest", n) else 1
+        return (ver, "flash" in n, stable)
+
+    names.sort(key=score, reverse=True)
+    log(f"[*] Models available to this key: {', '.join(names[:12]) or 'none'}")
+    return names
+
+
 def call_gemini(system, user):
     if not API_KEY:
         log("[-] GEMINI_API_KEY secret is missing or empty.")
@@ -48,13 +74,16 @@ def call_gemini(system, user):
         "generationConfig": {"responseMimeType": "application/json",
                              "temperature": 0.2, "maxOutputTokens": 65536},
     }
-    for model in MODELS:
+    models = list(PREFERRED)
+    models += [m for m in available_models() if m not in models][:4]
+    for model in models:
+        tries = 5 if model == models[0] else 3
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        for attempt in range(1, 6):
+        for attempt in range(1, tries + 1):
             try:
-                r = requests.post(url, params={"key": API_KEY}, json=payload, timeout=300)
+                r = requests.post(url, params={"key": API_KEY}, json=payload, timeout=420)
             except requests.RequestException as e:
-                log(f"[!] {model} network error ({e}); retry {attempt}/5")
+                log(f"[!] {model} network error ({e}); retry {attempt}/{tries}")
                 time.sleep(min(60, 5 * 2 ** attempt))
                 continue
             if r.status_code == 200:
@@ -68,7 +97,7 @@ def call_gemini(system, user):
                     break
             if r.status_code in (429, 500, 502, 503, 504):
                 wait = min(90, 5 * 2 ** attempt)
-                log(f"[!] {model} HTTP {r.status_code}; retry {attempt}/5 in {wait}s")
+                log(f"[!] {model} HTTP {r.status_code}; retry {attempt}/{tries} in {wait}s")
                 time.sleep(wait)
                 continue
             log(f"[!] {model} HTTP {r.status_code}: {r.text[:300]} -> trying next model")
