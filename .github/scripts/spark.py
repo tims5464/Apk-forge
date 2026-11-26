@@ -98,6 +98,10 @@ def call_gemini(system, user, skip=()):
                     parts = data["candidates"][0]["content"]["parts"]
                     text = "".join(p.get("text", "") for p in parts if not p.get("thought"))
                     Path("spark_raw_response.txt").write_text(text)
+                    finish = data["candidates"][0].get("finishReason")
+                    if finish == "MAX_TOKENS":
+                        log(f"[!] {model} output was truncated (MAX_TOKENS) -> next model")
+                        break
                     if not text.strip():
                         log(f"[!] {model} returned empty text (finish: {data['candidates'][0].get('finishReason')})")
                         break
@@ -107,7 +111,11 @@ def call_gemini(system, user, skip=()):
                     log(f"[!] {model} returned no usable candidate: {r.text[:500]}")
                     break
             if r.status_code == 429 and re.search(r"quota|limit: 0|billing", r.text, re.I):
-                log(f"[!] {model} quota exhausted for this key -> next model")
+                try:
+                    detail = r.json()["error"]["message"].splitlines()[0][:200]
+                except Exception:
+                    detail = r.text[:200]
+                log(f"[!] {model} quota exhausted for this key ({detail}) -> next model")
                 break
             if r.status_code in (429, 500, 502, 503, 504):
                 wait = min(90, 5 * 2 ** attempt)
