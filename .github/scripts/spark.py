@@ -72,10 +72,15 @@ def call_gemini(system, user):
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
         "generationConfig": {"responseMimeType": "application/json",
+                             "responseSchema": {"type": "ARRAY", "items": {"type": "OBJECT",
+                                 "properties": {"path": {"type": "STRING"}, "content": {"type": "STRING"}},
+                                 "required": ["path", "content"]}},
                              "temperature": 0.2, "maxOutputTokens": 65536},
     }
     models = list(PREFERRED)
-    models += [m for m in available_models() if m not in models][:4]
+    avail = available_models()
+    flash = [m for m in avail if "flash" in m]
+    models += [m for m in flash + avail if m not in models][:8]
     for model in models:
         tries = 5 if model == models[0] else 3
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
@@ -95,6 +100,9 @@ def call_gemini(system, user):
                 except (KeyError, IndexError, ValueError):
                     log(f"[!] {model} returned no usable candidate: {r.text[:500]}")
                     break
+            if r.status_code == 429 and re.search(r"quota|limit: 0|billing", r.text, re.I):
+                log(f"[!] {model} quota exhausted for this key -> next model")
+                break
             if r.status_code in (429, 500, 502, 503, 504):
                 wait = min(90, 5 * 2 ** attempt)
                 log(f"[!] {model} HTTP {r.status_code}; retry {attempt}/{tries} in {wait}s")
@@ -109,11 +117,17 @@ def call_gemini(system, user):
 def parse_files(text):
     text = text.strip()
     text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text)
+    def loads(t):
+        try:
+            return json.loads(t, strict=False)
+        except json.JSONDecodeError:
+            fixed = re.sub(r'\\(.)', lambda m: m.group(0) if m.group(1) in '"\\/bfnrtu' else '\\\\' + m.group(1), t, flags=re.S)
+            return json.loads(fixed, strict=False)
     try:
-        data = json.loads(text)
+        data = loads(text)
     except json.JSONDecodeError:
         start, end = text.find("["), text.rfind("]")
-        data = json.loads(text[start:end + 1])
+        data = loads(text[start:end + 1])
     if isinstance(data, dict):
         data = data.get("files") or ([data] if "path" in data else [
             {"path": data["target_file"], "content": data["fixed_content"]}])
@@ -160,13 +174,18 @@ def generate():
         log("[-] PROMPT_TEXT is empty.")
         sys.exit(1)
     system = "You are Spark, an autonomous senior Android engineer.\n" + RULES
-    text = call_gemini(system, f"Generate the complete, compilable Android project for this spec:\n\n{prompt}")
-    if not text:
-        sys.exit(1)
-    try:
-        n = write_files(parse_files(text))
-    except Exception as e:
-        log(f"[-] Could not parse model output: {e}\n{text[:1000]}")
+    n = 0
+    for attempt in range(1, 4):
+        text = call_gemini(system, f"Generate the complete, compilable Android project for this spec:\n\n{prompt}")
+        if not text:
+            sys.exit(1)
+        try:
+            n = write_files(parse_files(text))
+            break
+        except Exception as e:
+            log(f"[!] Could not parse model output (attempt {attempt}/3): {e}")
+    else:
+        log("[-] Model output unparseable after 3 attempts.")
         sys.exit(1)
     log(f"[+] Successfully wrote {n} files.")
     if n == 0 or not (ROOT / "settings.gradle").exists() and not (ROOT / "settings.gradle.kts").exists():
